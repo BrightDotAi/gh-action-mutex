@@ -1,6 +1,6 @@
 #!/bin/bash -e
 
-if [ $ARG_DEBUG != "false" ]; then
+if [ "$ARG_DEBUG" != "false" ]; then
 	set -x
 fi
 
@@ -15,12 +15,17 @@ cd "$ARG_CHECKOUT_LOCATION"
 
 __mutex_queue_file=mutex_queue
 __repo_url="https://x-access-token:$ARG_REPO_TOKEN@$ARG_GITHUB_SERVER/$ARG_REPOSITORY"
-__ticket_id="$GITHUB_RUN_ID-$(date +%s)-$(( $RANDOM % 1000 ))-$ARG_TICKET_ID_SUFFIX"
-echo "ticket_id=$__ticket_id" >> $GITHUB_STATE
+
+# Strip commas/whitespace so the suffix can't corrupt the CSV line format.
+__suffix=$(printf '%s' "$ARG_TICKET_ID_SUFFIX" | tr -d ', \t\r\n')
+__ticket_id="$GITHUB_RUN_ID-$(date +%s)-$(( RANDOM % 1000 ))-$__suffix"
+echo "ticket_id=$__ticket_id" >> "$GITHUB_STATE"
+
+# Self-describing line lets any waiter check the holder's run-attempt status.
+RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}"
 
 set_up_repo "$__repo_url"
-enqueue $ARG_BRANCH $__mutex_queue_file $__ticket_id
-wait_for_lock $ARG_BRANCH $__mutex_queue_file $__ticket_id
+enqueue "$ARG_BRANCH" "$__mutex_queue_file" "$__ticket_id"
+wait_for_lock "$ARG_BRANCH" "$__mutex_queue_file" "$__ticket_id"
 
 echo "Lock successfully acquired"
-
