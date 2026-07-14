@@ -298,6 +298,16 @@ try_evict() {
 	return 0
 }
 
+# Validate the max-wait-seconds input: empty = unbounded; else must be a non-negative int.
+# Fail fast (rc 1 + ::error) rather than silently treating garbage as unbounded.
+validate_max_wait() {
+	if [ -n "${1:-}" ] && ! printf '%s' "$1" | grep -qE '^[0-9]+$'; then
+		echo "::error title=Invalid max-wait-seconds::max-wait-seconds must be a non-negative integer (got '$1')"
+		return 1
+	fi
+	return 0
+}
+
 # Wait for the lock to become available (iterative, to carry eviction-check state).
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
@@ -318,20 +328,10 @@ wait_for_lock() {
 
 		__first=$(first_nonblank_line "$__queue_file")
 		__pos=$(queue_position "$__ticket_id" "$__queue_file")
-
-		# Empty/all-blank queue OR our ticket missing (e.g. evicted or a UI blank-out):
-		# re-enqueue and re-evaluate. Never proceed without seeing our own ticket.
-		if [ -z "$__first" ] || [ -z "$__pos" ]; then
-			echo "[$__ticket_id] Not present in queue (empty or lost); re-enqueuing"
-			enqueue "$__branch" "$__queue_file" "$__ticket_id"
-			__last_holder=""
-			__last_check=0
-			__first_iter=1
-			continue
-		fi
-
 		__holder=$(field1 "$__first")
-		if [ "$__holder" = "$__ticket_id" ]; then
+
+		# Already the holder: acquire immediately, regardless of the wait budget.
+		if [ -n "$__first" ] && [ "$__holder" = "$__ticket_id" ]; then
 			acquire_amend "$__branch" "$__queue_file" "$__ticket_id"
 			return 0
 		fi
@@ -339,6 +339,8 @@ wait_for_lock() {
 		__now=$(date +%s)
 
 		# max-wait-seconds: self-dequeue, emit an error annotation, and fail.
+		# Evaluated BEFORE the re-enqueue path so a timeout still fires even while
+		# we are repeatedly re-enqueuing a lost/evicted ticket.
 		if [ -n "${ARG_MAX_WAIT_SECONDS:-}" ] && [ "${ARG_MAX_WAIT_SECONDS}" -gt 0 ]; then
 			__waited=$((__now - __start))
 			if [ "$__waited" -gt "$ARG_MAX_WAIT_SECONDS" ]; then
@@ -349,6 +351,17 @@ wait_for_lock() {
 				echo "::error title=Mutex wait timeout::Waited ${__waited}s (limit ${ARG_MAX_WAIT_SECONDS}s) for the mutex.%0ACurrent holder: ${__holder_line}%0AQueue:%0A${__queue_dump}Check whether the holder run is still running."
 				exit 1
 			fi
+		fi
+
+		# Empty/all-blank queue OR our ticket missing (e.g. evicted or a UI blank-out):
+		# re-enqueue and re-evaluate. Never proceed without seeing our own ticket.
+		if [ -z "$__first" ] || [ -z "$__pos" ]; then
+			echo "[$__ticket_id] Not present in queue (empty or lost); re-enqueuing"
+			enqueue "$__branch" "$__queue_file" "$__ticket_id"
+			__last_holder=""
+			__last_check=0
+			__first_iter=1
+			continue
 		fi
 
 		# Eviction-check triggers: (t1) first wait iteration, (t2) holder changed,

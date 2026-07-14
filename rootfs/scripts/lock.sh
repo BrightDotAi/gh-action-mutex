@@ -16,6 +16,8 @@ cd "$ARG_CHECKOUT_LOCATION"
 __mutex_queue_file=mutex_queue
 __repo_url="https://x-access-token:$ARG_REPO_TOKEN@$ARG_GITHUB_SERVER/$ARG_REPOSITORY"
 
+validate_max_wait "$ARG_MAX_WAIT_SECONDS" || exit 1
+
 # Strip commas/whitespace AND backslashes: a literal backslash in the ticket would
 # survive to awk and break field matching (awk sees it as an escape). The trailing
 # '\\' in the single-quoted set is one backslash char handed to tr.
