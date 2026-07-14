@@ -277,12 +277,13 @@ try_evict() {
 # Wait for the lock to become available (iterative, to carry eviction-check state).
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
-# uses globals RUN_URL, MUTEX_POLL_SECONDS
+# uses globals RUN_URL, ARG_MAX_WAIT_SECONDS, MUTEX_POLL_SECONDS
 wait_for_lock() {
 	__branch=$1
 	__queue_file=$2
 	__ticket_id=$3
 
+	__start=$(date +%s)
 	__last_holder=""
 	__last_check=0
 	__first_iter=1
@@ -312,6 +313,19 @@ wait_for_lock() {
 		fi
 
 		__now=$(date +%s)
+
+		# max-wait-seconds: self-dequeue, emit an error annotation, and fail.
+		if [ -n "${ARG_MAX_WAIT_SECONDS:-}" ] && [ "${ARG_MAX_WAIT_SECONDS}" -gt 0 ]; then
+			__waited=$((__now - __start))
+			if [ "$__waited" -gt "$ARG_MAX_WAIT_SECONDS" ]; then
+				__holder_line=$__first
+				__queue_dump=$(awk '/[^[:space:]]/ {printf "%s%%0A", $0}' "$__queue_file")
+				echo "[$__ticket_id] Max wait exceeded (${__waited}s > ${ARG_MAX_WAIT_SECONDS}s); self-dequeuing"
+				dequeue "$__branch" "$__queue_file" "$__ticket_id"
+				echo "::error title=Mutex wait timeout::Waited ${__waited}s (limit ${ARG_MAX_WAIT_SECONDS}s) for the mutex.%0ACurrent holder: ${__holder_line}%0AQueue:%0A${__queue_dump}Check whether the holder run is still running."
+				exit 1
+			fi
+		fi
 
 		# Eviction-check triggers: (t1) first wait iteration, (t2) holder changed,
 		# (t3) same holder every 60*(position-1)s.

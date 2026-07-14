@@ -33,6 +33,10 @@ inputs:
     description: 'Ticket id suffix to avoid identical values for parallel/matrix jobs in the same workflow run'
     required: false
     default: 'default'
+  max-wait-seconds:
+    description: 'Max seconds to wait for the lock before self-dequeuing and failing. Empty (default) waits indefinitely.'
+    required: false
+    default: ''
 runs:
   using: 'docker'
   image: 'Dockerfile'
@@ -44,6 +48,7 @@ runs:
     ARG_REPO_TOKEN: ${{ inputs.repo-token }}
     ARG_DEBUG: ${{ inputs.debug }}
     ARG_TICKET_ID_SUFFIX: ${{ inputs.ticket-id-suffix}}
+    ARG_MAX_WAIT_SECONDS: ${{ inputs.max-wait-seconds }}
   entrypoint: '/scripts/lock.sh'
   post-entrypoint: '/scripts/unlock.sh'
 
