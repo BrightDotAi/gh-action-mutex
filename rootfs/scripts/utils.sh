@@ -149,6 +149,11 @@ enqueue() {
 		echo "$__ticket_id,$RUN_URL,$(date +%s)" >> "$__queue_file"
 
 		git add "$__queue_file"
+		# Empty-commit guard: a no-op staging must not abort the script under set -e.
+		if git diff --cached --quiet; then
+			echo "[$__ticket_id] Nothing to commit; already enqueued"
+			return 0
+		fi
 		git commit -m "[$__ticket_id] Enqueue ($GITHUB_REPOSITORY run $GITHUB_RUN_ID attempt ${GITHUB_RUN_ATTEMPT:-1})" --quiet
 
 		if git_push "$__branch"; then
@@ -168,34 +173,44 @@ acquire_amend() {
 	__queue_file=$2
 	__ticket_id=$3
 
-	__attempt=0
-	while [ "$__attempt" -lt 5 ]; do
-		__attempt=$((__attempt + 1))
+	# Advisory only: isolate the entire body in a subshell and swallow ANY failure
+	# (awk/mv/commit under set -e included) so a bad amend can never fail the lock step.
+	if ! (
+		set -e
+		__attempt=0
+		while [ "$__attempt" -lt 5 ]; do
+			__attempt=$((__attempt + 1))
 
-		__line=$(first_nonblank_line "$__queue_file")
-		if [ "$(field1 "$__line")" != "$__ticket_id" ]; then
-			return 0
-		fi
-		# Only amend a pristine 3-field line; old-format (1) or already-amended (4) → skip.
-		if [ "$(nfields "$__line")" -ne 3 ]; then
-			return 0
-		fi
+			__line=$(first_nonblank_line "$__queue_file")
+			if [ "$(field1 "$__line")" != "$__ticket_id" ]; then
+				exit 0
+			fi
+			# Only amend a pristine 3-field line; old-format (1) or already-amended (4) → skip.
+			if [ "$(nfields "$__line")" -ne 3 ]; then
+				exit 0
+			fi
 
-		__new="$__line,$(date +%s)"
-		awk -v L="$__line" -v NEW="$__new" '/[^[:space:]]/ { if ($0 == L) print NEW; else print }' \
-			"$__queue_file" > "$__queue_file.tmp" && mv "$__queue_file.tmp" "$__queue_file"
+			__new="$__line,$(date +%s)"
+			# ENVIRON (not -v): -v escape-processes backslashes; a line with a literal
+			# backslash would never match and the amend would silently no-op.
+			L="$__line" NEW="$__new" awk '/[^[:space:]]/ { if ($0 == ENVIRON["L"]) print ENVIRON["NEW"]; else print }' \
+				"$__queue_file" > "$__queue_file.tmp" && mv "$__queue_file.tmp" "$__queue_file"
 
-		git add "$__queue_file"
-		git commit -m "[$__ticket_id] Acquire" --quiet
+			git add "$__queue_file"
+			git commit -m "[$__ticket_id] Acquire" --quiet
 
-		if git_push "$__branch"; then
-			return 0
-		fi
-		sleep "${MUTEX_RETRY_SLEEP:-1}"
-		update_branch "$__branch"
-	done
+			if git_push "$__branch"; then
+				exit 0
+			fi
+			sleep "${MUTEX_RETRY_SLEEP:-1}"
+			update_branch "$__branch"
+		done
 
-	echo "[$__ticket_id] Could not persist acquire timestamp after retries; proceeding"
+		echo "[$__ticket_id] Could not persist acquire timestamp after retries; proceeding"
+		exit 0
+	); then
+		echo "[$__ticket_id] Acquire-amend failed (advisory); proceeding without timestamp"
+	fi
 	return 0
 }
 
@@ -248,7 +263,9 @@ try_evict() {
 		return 0
 	fi
 
-	__status=$(printf '%s' "$__resp" | jq -r '.status // empty' 2>/dev/null)
+	# `|| true`: a jq parse failure must yield empty status (→ not evicting), not
+	# abort the script under set -e.
+	__status=$(printf '%s' "$__resp" | jq -r '.status // empty' 2>/dev/null || true)
 	if [ -z "$__status" ]; then
 		echo "[$__ticket_id] Holder [$__holder] status unparseable; not evicting"
 		return 0
@@ -268,6 +285,11 @@ try_evict() {
 	echo "[$__ticket_id] Evicting stale holder [$__holder] (run attempt completed)"
 	remove_exact "$__holder_line" "$__queue_file"
 	git add "$__queue_file"
+	# Empty-commit guard: a no-op removal must not abort the script under set -e.
+	if git diff --cached --quiet; then
+		echo "[$__ticket_id] Eviction produced no change; nothing to commit"
+		return 0
+	fi
 	git commit -m "[$__ticket_id] Evict stale holder [$__holder] (run attempt completed)" --quiet
 	if ! git_push "$__branch"; then
 		# Do not blind-retry: let the wait loop re-fetch and re-evaluate from scratch.
