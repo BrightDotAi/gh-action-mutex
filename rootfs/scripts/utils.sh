@@ -117,6 +117,11 @@ remove_by_field1() {
 	awk -F, -v t="$1" '/[^[:space:]]/ && $1 != t' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
 }
 
+# Remove exactly one whole line (fixed-string) and drop blanks, in place.
+remove_exact() {
+	awk -v L="$1" '/[^[:space:]]/ && $0 != L' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
+}
+
 # Add to the queue (iterative; FF-push retry on rejection). No-op if already queued.
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
@@ -192,7 +197,84 @@ acquire_amend() {
 	return 0
 }
 
-# Wait for the lock to become available (iterative).
+# Attempt to evict the current (line-1) holder, but only on positive evidence
+# (the holder's run attempt is completed). Never evicts on doubt.
+# args:
+#   $1: branch  $2: queue_file  $3: ticket_id  $4: observed holder line
+try_evict() {
+	__branch=$1
+	__queue_file=$2
+	__ticket_id=$3
+	__holder_line=$4
+	__holder=$(field1 "$__holder_line")
+
+	# field 2 = run URL; old-format lines have none → cannot verify, never evict.
+	__url=$(printf '%s' "$__holder_line" | awk -F, '{print $2}')
+	if [ -z "$__url" ] || [ "$__url" = "$__holder_line" ]; then
+		echo "[$__ticket_id] Holder [$__holder] has no run URL (old-format); cannot verify, not evicting"
+		return 0
+	fi
+
+	# Attempt-specific endpoint: a re-run makes the plain runs endpoint report the
+	# latest attempt, masking an orphaned earlier attempt as still alive.
+	if [[ "$__url" =~ ^(https?)://([^/]+)/(.+)/actions/runs/([0-9]+)/attempts/([0-9]+)$ ]]; then
+		__scheme=${BASH_REMATCH[1]}
+		__server=${BASH_REMATCH[2]}
+		__orgrepo=${BASH_REMATCH[3]}
+		__runid=${BASH_REMATCH[4]}
+		__att=${BASH_REMATCH[5]}
+	else
+		echo "[$__ticket_id] Holder [$__holder] URL not a recognized run-attempt URL; not evicting"
+		return 0
+	fi
+
+	if [ "$__server" = "github.com" ] || [ "$__server" = "www.github.com" ]; then
+		__api="https://api.github.com/repos/$__orgrepo/actions/runs/$__runid/attempts/$__att"
+	else
+		__api="$__scheme://$__server/api/v3/repos/$__orgrepo/actions/runs/$__runid/attempts/$__att"
+	fi
+
+	set +e
+	__resp=$(curl -sf --max-time 10 \
+		-H "Authorization: Bearer $ARG_REPO_TOKEN" \
+		-H "Accept: application/vnd.github+json" \
+		"$__api" 2>/dev/null)
+	__rc=$?
+	set -e
+	if [ "$__rc" -ne 0 ] || [ -z "$__resp" ]; then
+		echo "[$__ticket_id] Could not query holder [$__holder] run status (API error); not evicting"
+		return 0
+	fi
+
+	__status=$(printf '%s' "$__resp" | jq -r '.status // empty' 2>/dev/null)
+	if [ -z "$__status" ]; then
+		echo "[$__ticket_id] Holder [$__holder] status unparseable; not evicting"
+		return 0
+	fi
+	if [ "$__status" != "completed" ]; then
+		echo "[$__ticket_id] Holder [$__holder] run status=$__status; not evicting"
+		return 0
+	fi
+
+	# CAS: re-fetch and confirm the same line is still the holder before removing it.
+	update_branch "$__branch"
+	if [ "$(first_nonblank_line "$__queue_file")" != "$__holder_line" ]; then
+		echo "[$__ticket_id] Queue changed before eviction; aborting"
+		return 0
+	fi
+
+	echo "[$__ticket_id] Evicting stale holder [$__holder] (run attempt completed)"
+	remove_exact "$__holder_line" "$__queue_file"
+	git add "$__queue_file"
+	git commit -m "[$__ticket_id] Evict stale holder [$__holder] (run attempt completed)" --quiet
+	if ! git_push "$__branch"; then
+		# Do not blind-retry: let the wait loop re-fetch and re-evaluate from scratch.
+		echo "[$__ticket_id] Eviction push rejected; will re-evaluate"
+	fi
+	return 0
+}
+
+# Wait for the lock to become available (iterative, to carry eviction-check state).
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
 # uses globals RUN_URL, MUTEX_POLL_SECONDS
@@ -200,6 +282,10 @@ wait_for_lock() {
 	__branch=$1
 	__queue_file=$2
 	__ticket_id=$3
+
+	__last_holder=""
+	__last_check=0
+	__first_iter=1
 
 	while : ; do
 		update_branch "$__branch"
@@ -213,6 +299,9 @@ wait_for_lock() {
 		if [ -z "$__first" ] || [ -z "$__pos" ]; then
 			echo "[$__ticket_id] Not present in queue (empty or lost); re-enqueuing"
 			enqueue "$__branch" "$__queue_file" "$__ticket_id"
+			__last_holder=""
+			__last_check=0
+			__first_iter=1
 			continue
 		fi
 
@@ -220,6 +309,32 @@ wait_for_lock() {
 		if [ "$__holder" = "$__ticket_id" ]; then
 			acquire_amend "$__branch" "$__queue_file" "$__ticket_id"
 			return 0
+		fi
+
+		__now=$(date +%s)
+
+		# Eviction-check triggers: (t1) first wait iteration, (t2) holder changed,
+		# (t3) same holder every 60*(position-1)s.
+		__do_check=0
+		if [ "$__first_iter" -eq 1 ]; then
+			__do_check=1
+		elif [ "$__holder" != "$__last_holder" ]; then
+			__do_check=1
+		else
+			__interval=$((60 * (__pos - 1)))
+			if [ "$__interval" -gt 0 ] && [ $((__now - __last_check)) -ge "$__interval" ]; then
+				__do_check=1
+			fi
+		fi
+		__first_iter=0
+		if [ "$__holder" != "$__last_holder" ]; then
+			__last_holder=$__holder
+		fi
+
+		if [ "$__do_check" -eq 1 ]; then
+			__last_check=$__now
+			try_evict "$__branch" "$__queue_file" "$__ticket_id" "$__first"
+			continue
 		fi
 
 		echo "[$__ticket_id] Waiting for lock - Current lock assigned to [$__holder]"
