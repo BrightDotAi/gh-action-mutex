@@ -107,19 +107,21 @@ gc_blanks() {
 }
 
 # 1-based position of our ticket among non-blank lines (field-1 match); empty if absent.
+# ENVIRON (not -v): awk -v escape-processes backslashes, so a ticket with a literal
+# backslash would never match the on-disk line. ENVIRON passes the value verbatim.
 queue_position() {
-	awk -F, -v t="$1" '/[^[:space:]]/ { i++; if ($1 == t) { print i; exit } }' "$2"
+	T="$1" awk -F, '/[^[:space:]]/ { i++; if ($1 == ENVIRON["T"]) { print i; exit } }' "$2"
 }
 
 # Remove every line whose field 1 == ticket, and drop blanks, in place.
 # Field/whole-line filtering (never a sed regex) because a run URL contains slashes.
 remove_by_field1() {
-	awk -F, -v t="$1" '/[^[:space:]]/ && $1 != t' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
+	T="$1" awk -F, '/[^[:space:]]/ && $1 != ENVIRON["T"]' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
 }
 
 # Remove exactly one whole line (fixed-string) and drop blanks, in place.
 remove_exact() {
-	awk -v L="$1" '/[^[:space:]]/ && $0 != L' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
+	L="$1" awk '/[^[:space:]]/ && $0 != ENVIRON["L"]' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
 }
 
 # Add to the queue (iterative; FF-push retry on rejection). No-op if already queued.
