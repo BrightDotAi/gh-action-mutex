@@ -50,6 +50,7 @@ setup_case() {
 	export MUTEX_POLL_SECONDS=0
 	export MUTEX_RETRY_SLEEP=0
 	export MUTEX_TEST_CURL="fail"
+	unset MUTEX_TEST_URL_LOG
 	RUN_URL="https://github.com/org/repo/actions/runs/12345/attempts/1"
 	TICKET="12345-100-1-default"
 }
@@ -248,6 +249,99 @@ assert_rc 0 "$RC" "13: try_evict returns 0"
 assert_log "Queue changed before eviction; aborting" "13: CAS abort logged"
 assert_eq 2 "$(nonblank_count)" "13: nothing removed (both lines intact)"
 if has_field1 "otherline"; then ok "13: actual holder untouched"; else bad "13: actual holder untouched"; fi
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "14: backslash in suffix is sanitized away (lock.sh sanitizer)"
+setup_case
+# Mirror lock.sh's suffix sanitizer on a backslash-bearing suffix.
+BAD_SUFFIX='a\t,b\c'
+CLEAN=$(printf '%s' "$BAD_SUFFIX" | tr -d ', \t\r\n\\')
+assert_eq "atbc" "$CLEAN" "14: backslash + commas/ws stripped from suffix"
+case "$CLEAN" in *\\*) bad "14: clean suffix still has a backslash";; *) ok "14: clean suffix has no backslash";; esac
+BSTICKET="77-100-9-$CLEAN"
+seed_origin </dev/null
+run_in_case 'enqueue "$ARG_BRANCH" "$QF" "'"$BSTICKET"'"; dequeue "$ARG_BRANCH" "$QF" "'"$BSTICKET"'"'
+assert_rc 0 "$RC" "14: enqueue+dequeue sanitized ticket rc 0"
+assert_eq 0 "$(nonblank_count)" "14: queue empty after dequeue"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "15: awk helpers match a line with a literal backslash (ENVIRON pin, not -v)"
+setup_case
+# A ticket carrying a literal backslash-t: -v would escape-process it and never
+# match the on-disk line; ENVIRON passes it verbatim. Pins the F1 fix directly.
+BSLINE='tick\tet,https://github.com/org/repo/actions/runs/1/attempts/1,10'
+BSTICK='tick\tet'
+F="$WORK/bsq"
+printf '%s\n' "$BSLINE" > "$F"
+assert_eq 1 "$(queue_position "$BSTICK" "$F")" "15: queue_position finds the backslash ticket"
+cp "$F" "$F.a"; remove_exact "$BSLINE" "$F.a"
+assert_eq 0 "$(awk 'NF' "$F.a" | wc -l | tr -d ' ')" "15: remove_exact drops the backslash line"
+cp "$F" "$F.b"; remove_by_field1 "$BSTICK" "$F.b"
+assert_eq 0 "$(awk 'NF' "$F.b" | wc -l | tr -d ' ')" "15: remove_by_field1 drops the backslash line"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "16: github.com holder derives api.github.com attempts URL"
+setup_case
+seed_origin </dev/null
+export MUTEX_TEST_CURL="in_progress"
+export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
+GH="ghholder,https://github.com/myorg/myrepo/actions/runs/555/attempts/3,10"
+run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$GH"'"'
+assert_rc 0 "$RC" "16: try_evict rc 0"
+assert_eq "https://api.github.com/repos/myorg/myrepo/actions/runs/555/attempts/3" "$(cat "$MUTEX_TEST_URL_LOG")" "16: github.com -> api.github.com/repos/.../attempts/N"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "17: GHES holder derives /api/v3 attempts URL"
+setup_case
+seed_origin </dev/null
+export MUTEX_TEST_CURL="in_progress"
+export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
+GHES="ghesholder,https://ghe.example.com/myorg/myrepo/actions/runs/777/attempts/2,10"
+run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$GHES"'"'
+assert_rc 0 "$RC" "17: try_evict rc 0"
+assert_eq "https://ghe.example.com/api/v3/repos/myorg/myrepo/actions/runs/777/attempts/2" "$(cat "$MUTEX_TEST_URL_LOG")" "17: GHES -> <server>/api/v3/repos/.../attempts/N"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "18: holder URL without /attempts/N -> no API call, no eviction"
+setup_case
+seed_origin </dev/null
+export MUTEX_TEST_CURL="completed"   # would evict if it wrongly reached the API
+export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
+NOATT="noattholder,https://github.com/org/repo/actions/runs/888,10"
+run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$NOATT"'"'
+assert_rc 0 "$RC" "18: try_evict rc 0"
+assert_log "not a recognized run-attempt URL" "18: rejected non-attempt URL"
+assert_eq "" "$(cat "$MUTEX_TEST_URL_LOG")" "18: no API call attempted (URL log empty)"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "19: odd/unparseable statuses -> not evicted"
+setup_case
+seed_origin </dev/null
+HL="oddholder,https://github.com/org/repo/actions/runs/999/attempts/1,10"
+for st in badjson empty queued; do
+	export MUTEX_TEST_CURL="$st"
+	run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$HL"'"'
+	assert_rc 0 "$RC" "19: try_evict rc 0 ($st)"
+	assert_log "not evicting" "19: not evicting on status=$st"
+done
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "20: max-wait-seconds validation"
+setup_case
+run_in_case 'validate_max_wait "60s"'
+assert_rc 1 "$RC" "20: rc 1 on non-integer max-wait"
+assert_log "Invalid max-wait-seconds" "20: error annotation emitted"
+run_in_case 'validate_max_wait "120"'
+assert_rc 0 "$RC" "20: rc 0 on valid integer"
+run_in_case 'validate_max_wait ""'
+assert_rc 0 "$RC" "20: rc 0 on empty (unbounded)"
 teardown_case
 
 # ---------------------------------------------------------------------------

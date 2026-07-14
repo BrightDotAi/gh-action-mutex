@@ -1,6 +1,12 @@
 #!/bin/bash
 # Network-free curl stub. Returns canned run-attempt JSON per MUTEX_TEST_CURL so
 # eviction tests need no network. Mimics `curl -sf`: HTTP errors -> exit 22.
+# If MUTEX_TEST_URL_LOG is set, append the requested URL (the last argument) to it
+# so tests can assert on the derived API endpoint.
+if [ -n "${MUTEX_TEST_URL_LOG:-}" ]; then
+	for __a in "$@"; do :; done
+	printf '%s\n' "$__a" >> "$MUTEX_TEST_URL_LOG"
+fi
 case "${MUTEX_TEST_CURL:-fail}" in
 	completed)   echo '{"status":"completed"}'; exit 0 ;;
 	in_progress) echo '{"status":"in_progress"}'; exit 0 ;;
