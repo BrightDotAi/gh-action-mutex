@@ -32,8 +32,15 @@ update_branch() {
 	git branch -D $__branch --quiet 2>/dev/null || true
 
 	while true; do
-		__fetch_output=$(git fetch origin $__branch 2>&1)
-		__fetch_status=$?
+		# lock.sh/unlock.sh run under `set -e`. A bare `VAR=$(cmd)` assignment
+		# statement DOES trigger errexit if cmd fails, killing the script before
+		# __fetch_status is even set. Wrapping it as the condition of an `if` is
+		# the standard way to capture a command's status without errexit firing.
+		if __fetch_output=$(git fetch origin $__branch 2>&1); then
+			__fetch_status=0
+		else
+			__fetch_status=$?
+		fi
 
 		if [ $__fetch_status -eq 0 ]; then
 			git checkout $__branch --quiet
