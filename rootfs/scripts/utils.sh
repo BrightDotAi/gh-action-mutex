@@ -12,15 +12,50 @@ set_up_repo() {
 }
 
 # Update the branch to the latest from the remote. Or checkout to an orphan branch
+# if the remote branch genuinely doesn't exist yet.
+#
+# A bare `git fetch ... || true` cannot tell "branch doesn't exist" apart from a
+# transient failure (network blip, auth hiccup, rate limit). Treating both the
+# same silently swaps in an empty orphan branch on a transient error, which is
+# safe for enqueue() (a rejected push there just triggers its own retry) but
+# fatal for dequeue(): it has no retry, so it hits its "not in queue" branch and
+# exits without ever removing the real ticket from the real remote queue --
+# permanently deadlocking every other caller waiting on this branch.
 # args:
 #   $1: branch
 update_branch() {
 	__branch=$1
+	__attempt=0
+	__max_attempts=5
 
 	git switch --orphan gh-action-mutex/temp-branch-$(date +%s) --quiet
 	git branch -D $__branch --quiet 2>/dev/null || true
-	git fetch origin $__branch --quiet 2>/dev/null || true
-	git checkout $__branch --quiet || git switch --orphan $__branch --quiet
+
+	while true; do
+		__fetch_output=$(git fetch origin $__branch 2>&1)
+		__fetch_status=$?
+
+		if [ $__fetch_status -eq 0 ]; then
+			git checkout $__branch --quiet
+			return
+		fi
+
+		if echo "$__fetch_output" | grep -q "couldn't find remote ref"; then
+			# Genuinely the first time this branch has ever been used.
+			git switch --orphan $__branch --quiet
+			return
+		fi
+
+		__attempt=$((__attempt + 1))
+		if [ $__attempt -ge $__max_attempts ]; then
+			echo "::error::update_branch: git fetch origin $__branch failed $__max_attempts times, refusing to fall back to an empty orphan branch. Last output:" >&2
+			echo "$__fetch_output" >&2
+			exit 1
+		fi
+
+		echo "update_branch: git fetch origin $__branch failed (attempt $__attempt/$__max_attempts), retrying: $__fetch_output" >&2
+		sleep $((__attempt * 2))
+	done
 }
 
 # Add to the queue
