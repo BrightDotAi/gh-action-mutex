@@ -1,14 +1,15 @@
 #!/bin/bash
 # Self-contained, network-free, Docker-free test harness for the mutex scripts.
 # Uses a bare git repo as origin (file://), a PATH curl stub for run-status, and
-# MUTEX_POLL_SECONDS/MUTEX_RETRY_SLEEP overrides to keep the suite fast.
+# MUTEX_POLL_SECONDS/MUTEX_RETRY_SLEEP/MUTEX_FETCH_RETRY_SLEEP overrides to keep the suite fast.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UTILS="$REPO_ROOT/rootfs/scripts/utils.sh"
 STUBDIR="$REPO_ROOT/tests/stubs"
 
 command -v jq >/dev/null 2>&1 || { echo "FATAL: jq is required for the eviction tests but was not found on PATH"; exit 1; }
-chmod +x "$STUBDIR/curl"
+chmod +x "$STUBDIR/curl" "$STUBDIR/flaky-git/git"
+export MUTEX_TEST_REAL_GIT="$(command -v git)"
 export PATH="$STUBDIR:$PATH"
 
 # shellcheck source=/dev/null
@@ -49,6 +50,7 @@ setup_case() {
 	export ARG_MAX_WAIT_SECONDS=""
 	export MUTEX_POLL_SECONDS=0
 	export MUTEX_RETRY_SLEEP=0
+	export MUTEX_FETCH_RETRY_SLEEP=0
 	export MUTEX_TEST_CURL="fail"
 	unset MUTEX_TEST_URL_LOG
 	RUN_URL="https://github.com/org/repo/actions/runs/12345/attempts/1"
@@ -342,6 +344,39 @@ run_in_case 'validate_max_wait "120"'
 assert_rc 0 "$RC" "20: rc 0 on valid integer"
 run_in_case 'validate_max_wait ""'
 assert_rc 0 "$RC" "20: rc 0 on empty (unbounded)"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "21: dequeue on persistent fetch failure -> exit 1, never silent success"
+setup_case
+printf '%s\n' "$TICKET,$RUN_URL,100" | seed_origin
+run_in_case 'git remote set-url origin "file://$WORK/missing.git"; dequeue "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 1 "$RC" "21: dequeue fails loudly"
+assert_log "refusing to fall back" "21: ::error explains the refusal"
+if grep -qF "already absent" "$WORK/out.log"; then bad "21: not misreported as already-absent"; else ok "21: not misreported as already-absent"; fi
+if has_field1 "$TICKET"; then ok "21: real ticket left on origin for eviction"; else bad "21: real ticket left on origin for eviction"; fi
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "22: transient fetch failure -> retried, then dequeues cleanly"
+setup_case
+printf '%s\n' "$TICKET,$RUN_URL,100" | seed_origin
+export MUTEX_TEST_FETCH_FAILS_FILE="$WORK/fetch_fails"; echo 2 > "$MUTEX_TEST_FETCH_FAILS_FILE"
+run_in_case 'export PATH="$STUBDIR/flaky-git:$PATH"; dequeue "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 0 "$RC" "22: dequeue succeeds after retries"
+assert_log "attempt 2/5" "22: retried through both transient failures"
+if grep -qF "attempt 3/5" "$WORK/out.log"; then bad "22: stopped retrying once fetch recovered"; else ok "22: stopped retrying once fetch recovered"; fi
+if has_field1 "$TICKET"; then bad "22: ticket removed from origin"; else ok "22: ticket removed from origin"; fi
+unset MUTEX_TEST_FETCH_FAILS_FILE
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "23: lock branch not yet on origin -> orphan path, no retries"
+setup_case
+run_in_case 'enqueue "$ARG_BRANCH" "$QF" "$TICKET"; wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 0 "$RC" "23: first-ever lock acquired"
+if grep -qF "retrying" "$WORK/out.log"; then bad "23: missing branch not treated as fetch failure"; else ok "23: missing branch not treated as fetch failure"; fi
+if has_field1 "$TICKET"; then ok "23: branch created with our ticket"; else bad "23: branch created with our ticket"; fi
 teardown_case
 
 # ---------------------------------------------------------------------------

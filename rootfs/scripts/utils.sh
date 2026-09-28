@@ -66,7 +66,7 @@ update_branch() {
 		fi
 
 		echo "update_branch: git fetch origin $__branch failed (attempt $__attempt/$__max_attempts), retrying: $__fetch_output" >&2
-		sleep $((__attempt * 2))
+		sleep $((__attempt * ${MUTEX_FETCH_RETRY_SLEEP:-2}))
 	done
 }
 

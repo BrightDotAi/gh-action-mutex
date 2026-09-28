@@ -1,0 +1,11 @@
+#!/bin/bash
+# Fails the first N `git fetch` calls (N read from MUTEX_TEST_FETCH_FAILS_FILE), else real git.
+if [ "${1:-}" = "fetch" ] && [ -s "${MUTEX_TEST_FETCH_FAILS_FILE:-}" ]; then
+	__n=$(cat "$MUTEX_TEST_FETCH_FAILS_FILE")
+	if [ "$__n" -gt 0 ]; then
+		echo $((__n - 1)) > "$MUTEX_TEST_FETCH_FAILS_FILE"
+		echo "fatal: unable to access 'https://github.com/': Could not resolve host: github.com" >&2
+		exit 128
+	fi
+fi
+exec "$MUTEX_TEST_REAL_GIT" "$@"
