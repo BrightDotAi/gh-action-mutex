@@ -259,15 +259,28 @@ try_evict() {
 		__api="https://$__server/api/v3/repos/$__orgrepo/actions/runs/$__runid/attempts/$__att"
 	fi
 
-	set +e
-	__resp=$(curl -sf --max-time 10 \
+	__out=$(curl -s --max-time 10 -w '\n%{http_code}' \
 		-H "Authorization: Bearer $ARG_REPO_TOKEN" \
 		-H "Accept: application/vnd.github+json" \
-		"$__api" 2>/dev/null)
-	__rc=$?
-	set -e
-	if [ "$__rc" -ne 0 ] || [ -z "$__resp" ]; then
-		echo "[$__ticket_id] Could not query holder [$__holder] run status (API error); not evicting"
+		"$__api" 2>/dev/null) || __out=$'\n000'
+	__code=${__out##*$'\n'}
+	__resp=${__out%$'\n'*}
+	case "$__code" in
+		200) ;;
+		401|403|404)
+			# Silent here = the original wedge: holders stay stuck and nothing says why.
+			if [ -z "${__MUTEX_INERT_WARNED:-}" ]; then
+				echo "::warning title=Mutex stale-lock eviction inert::HTTP $__code reading holder run status; repo-token needs actions:read on $__orgrepo. Stale holders will not be auto-evicted."
+				__MUTEX_INERT_WARNED=1
+			fi
+			echo "[$__ticket_id] Could not query holder [$__holder] run status (HTTP $__code); not evicting"
+			return 0 ;;
+		*)
+			echo "[$__ticket_id] Could not query holder [$__holder] run status (HTTP $__code); not evicting"
+			return 0 ;;
+	esac
+	if [ -z "$__resp" ]; then
+		echo "[$__ticket_id] Holder [$__holder] run status response empty; not evicting"
 		return 0
 	fi
 

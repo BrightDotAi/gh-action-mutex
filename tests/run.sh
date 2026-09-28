@@ -201,7 +201,8 @@ export ARG_MAX_WAIT_SECONDS=1
 run_in_case 'enqueue "$ARG_BRANCH" "$QF" "$TICKET"; wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
 assert_rc 1 "$RC" "9: timed out (rc 1)"
 if has_field1 "unknownticket"; then ok "9: holder NOT evicted on API error"; else bad "9: holder NOT evicted on API error"; fi
-assert_log "API error" "9: logged API error, not evicting"
+assert_log "HTTP 000" "9: logged transport failure, not evicting"
+if grep -qF "eviction inert" "$WORK/out.log"; then bad "9: transient failure does not claim eviction is inert"; else ok "9: transient failure does not claim eviction is inert"; fi
 teardown_case
 
 # ---------------------------------------------------------------------------
@@ -393,6 +394,36 @@ assert_eq "" "$(cat "$MUTEX_TEST_URL_LOG")" "24: no request made to the named ho
 assert_log "unexpected server" "24: ::warning names the refusal"
 if has_field1 "evilholder"; then ok "24: holder not evicted"; else bad "24: holder not evicted"; fi
 teardown_case
+
+# ---------------------------------------------------------------------------
+start "25: HTTP 403 -> not evicted, inert warning emitted once per job"
+setup_case
+H="deadholder,https://github.com/org/repo/actions/runs/555/attempts/1,10"
+printf '%s\n' "$H" | seed_origin
+export MUTEX_TEST_CURL="http403"
+run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$H"'"; try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$H"'"'
+assert_rc 0 "$RC" "25: try_evict rc 0"
+assert_eq 1 "$(grep -c 'eviction inert' "$WORK/out.log")" "25: inert warning emitted exactly once across two checks"
+assert_eq 2 "$(grep -c 'run status (HTTP 403); not evicting' "$WORK/out.log")" "25: each check still logs its own outcome"
+assert_log "actions:read" "25: warning names the missing permission"
+if has_field1 "deadholder"; then ok "25: holder not evicted"; else bad "25: holder not evicted"; fi
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "26: 401/404 warn as inert; 429/500 are transient; none evict"
+for M in http401 http404 http429 http500; do
+	setup_case
+	H="holder,https://github.com/org/repo/actions/runs/556/attempts/1,10"
+	printf '%s\n' "$H" | seed_origin
+	export MUTEX_TEST_CURL="$M"
+	run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$H"'"'
+	if has_field1 "holder"; then ok "26[$M]: not evicted"; else bad "26[$M]: not evicted"; fi
+	case "$M" in
+		http401|http404) assert_log "eviction inert" "26[$M]: inert warning" ;;
+		*) if grep -qF "eviction inert" "$WORK/out.log"; then bad "26[$M]: transient, no inert warning"; else ok "26[$M]: transient, no inert warning"; fi ;;
+	esac
+	teardown_case
+done
 
 # ---------------------------------------------------------------------------
 start "27: www.github.com holder is the configured github.com, not refused"

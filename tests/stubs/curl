@@ -1,17 +1,29 @@
 #!/bin/bash
-# Network-free curl stub. Returns canned run-attempt JSON per MUTEX_TEST_CURL so
-# eviction tests need no network. Mimics `curl -sf`: HTTP errors -> exit 22.
-# If MUTEX_TEST_URL_LOG is set, append the requested URL (the last argument) to it
-# so tests can assert on the derived API endpoint.
+# Network-free curl stub for `curl -s -w '\n%{http_code}' URL`: prints body, newline, status.
+# Mode via MUTEX_TEST_CURL; `byrun` = completed iff the URL's run id is in MUTEX_TEST_CURL_COMPLETED_RUNS.
+# If MUTEX_TEST_URL_LOG is set, append the requested URL (the last argument) to it.
+for __a in "$@"; do :; done
 if [ -n "${MUTEX_TEST_URL_LOG:-}" ]; then
-	for __a in "$@"; do :; done
 	printf '%s\n' "$__a" >> "$MUTEX_TEST_URL_LOG"
 fi
-case "${MUTEX_TEST_CURL:-fail}" in
-	completed)   echo '{"status":"completed"}'; exit 0 ;;
-	in_progress) echo '{"status":"in_progress"}'; exit 0 ;;
-	queued)      echo '{"status":"queued"}'; exit 0 ;;
-	badjson)     echo 'this is not json'; exit 0 ;;
-	empty)       exit 0 ;;
-	fail|*)      exit 22 ;;
+__mode=${MUTEX_TEST_CURL:-fail}
+if [ "$__mode" = "byrun" ]; then
+	__run=$(printf '%s' "$__a" | sed -n 's#.*/actions/runs/\([0-9]*\)/.*#\1#p')
+	__mode=in_progress
+	for __r in ${MUTEX_TEST_CURL_COMPLETED_RUNS:-}; do
+		[ "$__r" = "$__run" ] && __mode=completed
+	done
+fi
+case "$__mode" in
+	completed)   printf '%s\n200' '{"status":"completed"}' ;;
+	in_progress) printf '%s\n200' '{"status":"in_progress"}' ;;
+	queued)      printf '%s\n200' '{"status":"queued"}' ;;
+	badjson)     printf '%s\n200' 'this is not json' ;;
+	empty)       printf '\n200' ;;
+	http401)     printf '%s\n401' '{"message":"Bad credentials"}' ;;
+	http403)     printf '%s\n403' '{"message":"Resource not accessible by integration"}' ;;
+	http404)     printf '%s\n404' '{"message":"Not Found"}' ;;
+	http429)     printf '%s\n429' '{"message":"API rate limit exceeded"}' ;;
+	http500)     printf '%s\n500' '{"message":"Server Error"}' ;;
+	fail|*)      printf '\n000'; exit 7 ;;
 esac
