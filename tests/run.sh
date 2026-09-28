@@ -458,6 +458,101 @@ if has_field1 "liveholder"; then ok "28: holder with unknown attempt NOT evicted
 teardown_case
 
 # ---------------------------------------------------------------------------
+# Concurrency stress: parallel workers share one origin; mkdir is the atomic overlap detector.
+PROD_UTILS="$REPO_ROOT/tests/fixtures/prod-utils.sh"
+
+cs_enter() {  # $1=who
+	if mkdir "$WORK/cs.lock" 2>/dev/null; then
+		echo "$1" > "$WORK/cs.lock/owner"
+		sleep 1
+		rm -rf "$WORK/cs.lock"
+	else
+		echo "BREACH: $1 entered while $(cat "$WORK/cs.lock/owner" 2>/dev/null) held" >> "$WORK/breach"
+	fi
+	echo "$1" >> "$WORK/done"
+}
+
+stress_worker() {  # $1=id $2=new|prod $3=run id
+	mkdir -p "$WORK/co.$1"
+	(
+		cd "$WORK/co.$1"; set -e
+		if [ "$2" = "prod" ]; then source "$PROD_UTILS"; fi
+		set_up_repo "file://$ORIGIN"
+		export GITHUB_RUN_ID="$3" GITHUB_RUN_ATTEMPT=1
+		RUN_URL=$(build_run_url)
+		__t="$3-$1-default"
+		enqueue "$ARG_BRANCH" "$QF" "$__t"
+		wait_for_lock "$ARG_BRANCH" "$QF" "$__t"
+		cs_enter "$1:$2"
+		dequeue "$ARG_BRANCH" "$QF" "$__t"
+	) > "$WORK/w$1.log" 2>&1
+	echo $? > "$WORK/w$1.rc"
+}
+
+# a deadlock must fail the suite, not hang it: kill whatever is still running at the deadline
+stress_wait() {  # $1=deadline seconds
+	local end=$((SECONDS + $1))
+	while [ -n "$(jobs -rp)" ] && [ "$SECONDS" -lt "$end" ]; do sleep 1; done
+	if [ -n "$(jobs -rp)" ]; then kill $(jobs -rp) 2>/dev/null; wait 2>/dev/null; return 1; fi
+	wait
+}
+
+stress_assert() {  # $1=label $2=worker count
+	if [ -s "$WORK/breach" ]; then bad "$1: no mutual-exclusion breach" "$(cat "$WORK/breach")"; else ok "$1: no mutual-exclusion breach"; fi
+	assert_eq "$2" "$(cat "$WORK/done" 2>/dev/null | wc -l | tr -d ' ')" "$1: all $2 workers ran the critical section"
+	assert_eq "0 " "$(cat "$WORK"/w*.rc 2>/dev/null | sort -u | tr '\n' ' ')" "$1: every worker exited 0"
+	assert_eq 0 "$(nonblank_count)" "$1: queue empty afterwards"
+}
+
+stress_env() {
+	export MUTEX_POLL_SECONDS=1 ARG_MAX_WAIT_SECONDS=90 MUTEX_TEST_CURL=byrun
+	export MUTEX_TEST_CURL_COMPLETED_RUNS="${1:-}"
+}
+
+# prod's dequeue uses GNU/busybox `sed -i '1d'`; BSD sed reads '1d' as a backup suffix
+sed_i_works() {
+	local f r; f=$(mktemp); printf 'a\nb\n' > "$f"
+	sed -i '1d' "$f" 2>/dev/null; r=$(cat "$f"); rm -f "$f" "${f}1d"
+	[ "$r" = "b" ]
+}
+
+# ---------------------------------------------------------------------------
+start "29: stress - 8 concurrent new-version workers"
+setup_case
+seed_origin </dev/null
+stress_env
+for i in 1 2 3 4 5 6 7 8; do stress_worker "$i" new "$((1000 + i))" & done
+if stress_wait 150; then ok "29: finished before the deadline"; else bad "29: finished before the deadline" "workers killed at 150s"; fi
+stress_assert 29 8
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "30: stress - 3 new + 3 prod-version workers on one branch"
+if sed_i_works; then
+	setup_case
+	seed_origin </dev/null
+	stress_env
+	for i in 1 2 3; do stress_worker "$i" new "$((2000 + i))" & done
+	for i in 4 5 6; do stress_worker "$i" prod "$((2000 + i))" & done
+	if stress_wait 240; then ok "30: finished before the deadline"; else bad "30: finished before the deadline" "workers killed at 240s"; fi
+	stress_assert 30 6
+	teardown_case
+else
+	echo "  skip - 30: prod code needs GNU/busybox 'sed -i' (BSD sed here); covered by the alpine image run"
+fi
+
+# ---------------------------------------------------------------------------
+start "31: stress - dead holder + 6 concurrent waiters -> exactly one eviction"
+setup_case
+printf '%s\n' "deadholder,https://github.com/org/repo/actions/runs/111/attempts/1,10" | seed_origin
+stress_env "111"
+for i in 1 2 3 4 5 6; do stress_worker "$i" new "$((3000 + i))" & done
+if stress_wait 150; then ok "31: finished before the deadline"; else bad "31: finished before the deadline" "workers killed at 150s"; fi
+stress_assert 31 6
+assert_eq 1 "$(commit_subjects | grep -cF 'Evict stale holder [deadholder]')" "31: exactly one eviction commit"
+teardown_case
+
+# ---------------------------------------------------------------------------
 echo
 echo "== results: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
