@@ -26,7 +26,7 @@ __ticket_id="$GITHUB_RUN_ID-$(date +%s)-$(( RANDOM % 1000 ))-$__suffix"
 echo "ticket_id=$__ticket_id" >> "$GITHUB_STATE"
 
 # Self-describing line lets any waiter check the holder's run-attempt status.
-RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}"
+RUN_URL=$(build_run_url)
 
 set_up_repo "$__repo_url"
 enqueue "$ARG_BRANCH" "$__mutex_queue_file" "$__ticket_id"

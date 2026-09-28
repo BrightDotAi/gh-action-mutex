@@ -437,6 +437,27 @@ assert_eq "https://api.github.com/repos/org/repo/actions/runs/888/attempts/1" "$
 teardown_case
 
 # ---------------------------------------------------------------------------
+start "28: run URL only carries /attempts/N when the attempt is known"
+setup_case
+export GITHUB_RUN_ATTEMPT="3"
+assert_eq "https://github.com/org/repo/actions/runs/12345/attempts/3" "$(build_run_url)" "28: known attempt -> /attempts/3"
+unset GITHUB_RUN_ATTEMPT
+assert_eq "https://github.com/org/repo/actions/runs/12345" "$(build_run_url)" "28: unset attempt -> no /attempts (not a guessed 1)"
+export GITHUB_RUN_ATTEMPT="abc"
+assert_eq "https://github.com/org/repo/actions/runs/12345" "$(build_run_url)" "28: non-numeric attempt -> no /attempts"
+# end-to-end: a live holder with an unknown attempt must survive a waiter whose stub says "completed"
+unset GITHUB_RUN_ATTEMPT
+printf '%s\n' "liveholder,$(build_run_url),10" | seed_origin
+export GITHUB_RUN_ATTEMPT="1"; export GITHUB_RUN_ID="99999"
+export MUTEX_TEST_CURL="completed"
+export MUTEX_POLL_SECONDS=1
+export ARG_MAX_WAIT_SECONDS=1
+run_in_case 'RUN_URL=$(build_run_url); enqueue "$ARG_BRANCH" "$QF" "$TICKET"; wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 1 "$RC" "28: waiter times out rather than evicting"
+if has_field1 "liveholder"; then ok "28: holder with unknown attempt NOT evicted"; else bad "28: holder with unknown attempt NOT evicted"; fi
+teardown_case
+
+# ---------------------------------------------------------------------------
 echo
 echo "== results: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]

@@ -127,6 +127,15 @@ remove_exact() {
 # Add to the queue (iterative; FF-push retry on rejection). No-op if already queued.
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
+# No /attempts/N unless the attempt is known: guessing 1 can name a completed attempt and evict a live re-run.
+build_run_url() {
+	__base="${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+	case "${GITHUB_RUN_ATTEMPT:-}" in
+		''|*[!0-9]*) printf '%s\n' "$__base" ;;
+		*)           printf '%s/attempts/%s\n' "$__base" "$GITHUB_RUN_ATTEMPT" ;;
+	esac
+}
+
 # uses global RUN_URL
 enqueue() {
 	__branch=$1
@@ -154,7 +163,7 @@ enqueue() {
 			echo "[$__ticket_id] Nothing to commit; already enqueued"
 			return 0
 		fi
-		git commit -m "[$__ticket_id] Enqueue ($GITHUB_REPOSITORY run $GITHUB_RUN_ID attempt ${GITHUB_RUN_ATTEMPT:-1})" --quiet
+		git commit -m "[$__ticket_id] Enqueue ($GITHUB_REPOSITORY run $GITHUB_RUN_ID attempt ${GITHUB_RUN_ATTEMPT:-unknown})" --quiet
 
 		if git_push "$__branch"; then
 			return 0
