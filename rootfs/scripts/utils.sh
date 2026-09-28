@@ -235,7 +235,6 @@ try_evict() {
 	# Attempt-specific endpoint: a re-run makes the plain runs endpoint report the
 	# latest attempt, masking an orphaned earlier attempt as still alive.
 	if [[ "$__url" =~ ^(https?)://([^/]+)/(.+)/actions/runs/([0-9]+)/attempts/([0-9]+)$ ]]; then
-		__scheme=${BASH_REMATCH[1]}
 		__server=${BASH_REMATCH[2]}
 		__orgrepo=${BASH_REMATCH[3]}
 		__runid=${BASH_REMATCH[4]}
@@ -245,10 +244,19 @@ try_evict() {
 		return 0
 	fi
 
-	if [ "$__server" = "github.com" ] || [ "$__server" = "www.github.com" ]; then
+	# The queue file is writable by anyone with push; never send the token to a host it names.
+	__expected=${ARG_GITHUB_SERVER:-github.com}
+	case "$__server" in www.github.com) __server=github.com ;; esac
+	case "$__expected" in www.github.com) __expected=github.com ;; esac
+	if [ "$__server" != "$__expected" ]; then
+		echo "::warning title=Mutex holder on unexpected server::[$__ticket_id] Holder [$__holder] URL names $__server, not $__expected; not evicting"
+		return 0
+	fi
+
+	if [ "$__server" = "github.com" ]; then
 		__api="https://api.github.com/repos/$__orgrepo/actions/runs/$__runid/attempts/$__att"
 	else
-		__api="$__scheme://$__server/api/v3/repos/$__orgrepo/actions/runs/$__runid/attempts/$__att"
+		__api="https://$__server/api/v3/repos/$__orgrepo/actions/runs/$__runid/attempts/$__att"
 	fi
 
 	set +e

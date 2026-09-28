@@ -297,15 +297,16 @@ assert_eq "https://api.github.com/repos/myorg/myrepo/actions/runs/555/attempts/3
 teardown_case
 
 # ---------------------------------------------------------------------------
-start "17: GHES holder derives /api/v3 attempts URL"
+start "17: GHES holder on the configured server -> https /api/v3 attempts URL"
 setup_case
 seed_origin </dev/null
+export ARG_GITHUB_SERVER="ghe.example.com"
 export MUTEX_TEST_CURL="in_progress"
 export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
-GHES="ghesholder,https://ghe.example.com/myorg/myrepo/actions/runs/777/attempts/2,10"
+GHES="ghesholder,http://ghe.example.com/myorg/myrepo/actions/runs/777/attempts/2,10"
 run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$GHES"'"'
 assert_rc 0 "$RC" "17: try_evict rc 0"
-assert_eq "https://ghe.example.com/api/v3/repos/myorg/myrepo/actions/runs/777/attempts/2" "$(cat "$MUTEX_TEST_URL_LOG")" "17: GHES -> <server>/api/v3/repos/.../attempts/N"
+assert_eq "https://ghe.example.com/api/v3/repos/myorg/myrepo/actions/runs/777/attempts/2" "$(cat "$MUTEX_TEST_URL_LOG")" "17: GHES -> https://<server>/api/v3/..., never the line's http scheme"
 teardown_case
 
 # ---------------------------------------------------------------------------
@@ -377,6 +378,31 @@ run_in_case 'enqueue "$ARG_BRANCH" "$QF" "$TICKET"; wait_for_lock "$ARG_BRANCH" 
 assert_rc 0 "$RC" "23: first-ever lock acquired"
 if grep -qF "retrying" "$WORK/out.log"; then bad "23: missing branch not treated as fetch failure"; else ok "23: missing branch not treated as fetch failure"; fi
 if has_field1 "$TICKET"; then ok "23: branch created with our ticket"; else bad "23: branch created with our ticket"; fi
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "24: holder URL names another server -> token never sent, not evicted"
+setup_case
+EVIL="evilholder,https://attacker.example/o/r/actions/runs/1/attempts/1,10"
+printf '%s\n' "$EVIL" | seed_origin
+export MUTEX_TEST_CURL="completed"   # would evict if the request were made
+export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
+run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$EVIL"'"'
+assert_rc 0 "$RC" "24: try_evict rc 0"
+assert_eq "" "$(cat "$MUTEX_TEST_URL_LOG")" "24: no request made to the named host"
+assert_log "unexpected server" "24: ::warning names the refusal"
+if has_field1 "evilholder"; then ok "24: holder not evicted"; else bad "24: holder not evicted"; fi
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "27: www.github.com holder is the configured github.com, not refused"
+setup_case
+seed_origin </dev/null
+export MUTEX_TEST_CURL="in_progress"
+export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
+W="wwwholder,https://www.github.com/org/repo/actions/runs/888/attempts/1,10"
+run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$W"'"'
+assert_eq "https://api.github.com/repos/org/repo/actions/runs/888/attempts/1" "$(cat "$MUTEX_TEST_URL_LOG")" "27: www.github.com -> api.github.com"
 teardown_case
 
 # ---------------------------------------------------------------------------
