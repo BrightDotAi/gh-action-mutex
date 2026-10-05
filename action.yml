@@ -34,7 +34,7 @@ inputs:
     required: false
     default: 'default'
   max-wait-seconds:
-    description: 'Max seconds to wait for the lock before self-dequeuing and failing. Empty (default) waits indefinitely.'
+    description: 'Max seconds to wait for the lock before self-dequeuing and failing: a positive integer up to 999999999. Empty (default) waits indefinitely.'
     required: false
     default: ''
 runs:

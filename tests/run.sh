@@ -358,6 +358,12 @@ run_in_case 'validate_max_wait "120"'
 assert_rc 0 "$RC" "20: rc 0 on valid integer"
 run_in_case 'validate_max_wait ""'
 assert_rc 0 "$RC" "20: rc 0 on empty (unbounded)"
+for V in 0 05 1234567890 -3; do
+	run_in_case "validate_max_wait '$V'"
+	assert_rc 1 "$RC" "20: rc 1 on '$V' (would silently mean forever, or octal)"
+done
+run_in_case 'validate_max_wait "999999999"'
+assert_rc 0 "$RC" "20: rc 0 on the 9-digit maximum"
 teardown_case
 
 # ---------------------------------------------------------------------------

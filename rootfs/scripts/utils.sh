@@ -330,14 +330,15 @@ try_evict() {
 	return 0
 }
 
-# Validate the max-wait-seconds input: empty = unbounded; else must be a non-negative int.
-# Fail fast (rc 1 + ::error) rather than silently treating garbage as unbounded.
+# Empty = unbounded, else 1..999999999. 0, 10+ digits or a leading 0 (octal in $(( ))) would mean "forever".
 validate_max_wait() {
-	if [ -n "${1:-}" ] && ! printf '%s' "$1" | grep -qE '^[0-9]+$'; then
-		echo "::error title=Invalid max-wait-seconds::max-wait-seconds must be a non-negative integer (got '$1')"
-		return 1
-	fi
-	return 0
+	case "${1:-}" in
+		'') return 0 ;;
+		*[!0-9]*|0*|??????????*) ;;
+		*) return 0 ;;
+	esac
+	echo "::error title=Invalid max-wait-seconds::max-wait-seconds must be empty (wait indefinitely) or a positive integer up to 999999999 (got '$1')"
+	return 1
 }
 
 # Wait for the lock to become available (iterative, to carry eviction-check state).
