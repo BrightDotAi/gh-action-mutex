@@ -100,6 +100,18 @@ HOOK
 	chmod +x "$ORIGIN/hooks/pre-receive"
 }
 
+# run a real entrypoint (executed, so its `bash -e` shebang applies); git rewrites its https lock URL to the local origin
+run_entry() {  # $1=lock.sh|unlock.sh  $2=ticket suffix
+	mkdir -p "$WORK/home"
+	printf '[url "file://%s"]\n\tinsteadOf = https://x-access-token:x@github.com/org/lock\n' "$ORIGIN" > "$WORK/home/.gitconfig"
+	( HOME="$WORK/home" ARG_DEBUG=false ARG_CHECKOUT_LOCATION="$WORK/entry" ARG_REPOSITORY=org/lock \
+	  ARG_TICKET_ID_SUFFIX="${2:-default}" RUNNER_NAME="${ENTRY_RUNNER:-r-1}" \
+	  STATE_ticket_id="$(sed -n 's/^ticket_id=//p' "$GITHUB_STATE")" \
+	  "$REPO_ROOT/rootfs/scripts/$1" ) > "$WORK/out.log" 2>&1
+	RC=$?
+}
+state_ticket() { sed -n 's/^ticket_id=//p' "$GITHUB_STATE"; }
+
 echo "== gh-action-mutex robustness suite =="
 
 # ---------------------------------------------------------------------------
@@ -242,14 +254,14 @@ if has_field1 "otherticket"; then ok "11: other holder untouched"; else bad "11:
 teardown_case
 
 # ---------------------------------------------------------------------------
-start "12: suffix sanitization"
-BAD_SUFFIX="a,b c	d"
-CLEAN=$(printf '%s' "$BAD_SUFFIX" | tr -d ', \t\r\n')
-assert_eq "abcd" "$CLEAN" "12: commas/whitespace stripped from suffix"
-T="99-100-5-$CLEAN"
-case "$T" in *,*) bad "12: ticket contains a comma";; *) ok "12: ticket contains no comma";; esac
-case "$T" in *" "*) bad "12: ticket contains a space";; *) ok "12: ticket contains no space";; esac
-teardown_case 2>/dev/null || true
+start "12: lock.sh strips commas/whitespace from the ticket suffix (real entrypoint)"
+setup_case
+seed_origin </dev/null
+run_entry lock.sh "$(printf 'a,b c\td')"
+assert_rc 0 "$RC" "12: lock.sh rc 0"
+case "$(state_ticket)" in *-abcd) ok "12: suffix sanitized to abcd";; *) bad "12: suffix sanitized to abcd" "got [$(state_ticket)]";; esac
+case "$(state_ticket)" in *,*|*" "*) bad "12: ticket has no comma/space";; *) ok "12: ticket has no comma/space";; esac
+teardown_case
 
 # ---------------------------------------------------------------------------
 start "13: CAS eviction race -> abort, no wrong line removed"
@@ -268,18 +280,15 @@ if has_field1 "otherline"; then ok "13: actual holder untouched"; else bad "13: 
 teardown_case
 
 # ---------------------------------------------------------------------------
-start "14: backslash in suffix is sanitized away (lock.sh sanitizer)"
+start "14: lock.sh strips a backslash from the suffix; unlock.sh releases that ticket"
 setup_case
-# Mirror lock.sh's suffix sanitizer on a backslash-bearing suffix.
-BAD_SUFFIX='a\t,b\c'
-CLEAN=$(printf '%s' "$BAD_SUFFIX" | tr -d ', \t\r\n\\')
-assert_eq "atbc" "$CLEAN" "14: backslash + commas/ws stripped from suffix"
-case "$CLEAN" in *\\*) bad "14: clean suffix still has a backslash";; *) ok "14: clean suffix has no backslash";; esac
-BSTICKET="77-100-9-$CLEAN"
 seed_origin </dev/null
-run_in_case 'enqueue "$ARG_BRANCH" "$QF" "'"$BSTICKET"'"; dequeue "$ARG_BRANCH" "$QF" "'"$BSTICKET"'"'
-assert_rc 0 "$RC" "14: enqueue+dequeue sanitized ticket rc 0"
-assert_eq 0 "$(nonblank_count)" "14: queue empty after dequeue"
+run_entry lock.sh 'a\t,b\c'
+assert_rc 0 "$RC" "14: lock.sh rc 0"
+case "$(state_ticket)" in *-atbc) ok "14: suffix sanitized to atbc";; *) bad "14: suffix sanitized to atbc" "got [$(state_ticket)]";; esac
+run_entry unlock.sh
+assert_rc 0 "$RC" "14: unlock.sh rc 0"
+assert_eq 0 "$(nonblank_count)" "14: queue empty after unlock"
 teardown_case
 
 # ---------------------------------------------------------------------------
@@ -681,6 +690,28 @@ export ARG_MAX_WAIT_SECONDS=5
 run_in_case 'enqueue "$ARG_BRANCH" "$QF" "$TICKET"; wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
 assert_rc 0 "$RC" "37: acquired well inside 5s"
 assert_eq "$TICKET" "$(first_line | cut -d, -f1)" "37: junk holder evicted, we hold the lock"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "38: real entrypoints write an evictable line and validate their inputs"
+setup_case
+seed_origin </dev/null
+run_entry lock.sh
+assert_rc 0 "$RC" "38: lock.sh rc 0"
+assert_log "Lock successfully acquired" "38: lock acquired"
+L=$(first_line)
+assert_eq "$(state_ticket)" "${L%%,*}" "38: field 1 is the ticket lock.sh saved to GITHUB_STATE"
+assert_eq "https://github.com/org/repo/actions/runs/12345/attempts/1#runner=r-1" "$(awk -F, '{print $2}' <<<"$L")" "38: field 2 is the run URL (wired by lock.sh, evictable)"
+assert_eq 4 "$(field_count "$L")" "38: acquire timestamp appended"
+run_entry unlock.sh
+assert_rc 0 "$RC" "38: unlock.sh rc 0"
+assert_log "Successfully unlocked" "38: unlocked"
+assert_eq 0 "$(nonblank_count)" "38: queue empty"
+export ARG_MAX_WAIT_SECONDS=0
+run_entry lock.sh
+assert_rc 1 "$RC" "38: lock.sh refuses max-wait-seconds=0"
+assert_log "Invalid max-wait-seconds" "38: ::error names the input"
+assert_eq 0 "$(nonblank_count)" "38: nothing enqueued on invalid input"
 teardown_case
 
 # ---------------------------------------------------------------------------
