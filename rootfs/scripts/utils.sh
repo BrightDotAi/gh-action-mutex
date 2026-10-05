@@ -277,7 +277,7 @@ try_evict() {
 
 	# field 2 = run URL; old-format lines have none → cannot verify, never evict.
 	__url=$(printf '%s' "$__holder_line" | awk -F, '{print $2}')
-	if [ -z "$__url" ] || [ "$__url" = "$__holder_line" ]; then
+	if [ -z "$__url" ]; then
 		echo "[$__ticket_id] Holder [$__holder] has no run URL (old-format); cannot verify, not evicting"
 		return 0
 	fi
@@ -404,7 +404,6 @@ wait_for_lock() {
 	arm_deadline
 	__last_holder=""
 	__last_check=0
-	__first_iter=1
 
 	while : ; do
 		update_branch "$__branch"
@@ -445,16 +444,12 @@ wait_for_lock() {
 			enqueue "$__branch" "$__queue_file" "$__ticket_id"
 			__last_holder=""
 			__last_check=0
-			__first_iter=1
 			continue
 		fi
 
-		# Eviction-check triggers: (t1) first wait iteration, (t2) holder changed,
-		# (t3) same holder every 60*(position-1)s.
+		# Eviction-check triggers: holder changed, or same holder every 60*(position-1)s (fires at once: __last_check=0).
 		__do_check=0
-		if [ "$__first_iter" -eq 1 ]; then
-			__do_check=1
-		elif [ "$__holder" != "$__last_holder" ]; then
+		if [ "$__holder" != "$__last_holder" ]; then
 			__do_check=1
 		else
 			__interval=$((60 * (__pos - 1)))
@@ -462,10 +457,7 @@ wait_for_lock() {
 				__do_check=1
 			fi
 		fi
-		__first_iter=0
-		if [ "$__holder" != "$__last_holder" ]; then
-			__last_holder=$__holder
-		fi
+		__last_holder=$__holder
 
 		if [ "$__do_check" -eq 1 ]; then
 			__last_check=$__now

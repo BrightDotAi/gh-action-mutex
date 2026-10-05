@@ -672,6 +672,18 @@ for C in dead live twice reused nofrag jobs500 over100; do
 done
 
 # ---------------------------------------------------------------------------
+start "37: holder with an empty field 1 is checked on first sight, not after 60s"
+setup_case
+printf '%s\n' ",https://github.com/org/repo/actions/runs/111/attempts/1,10" | seed_origin
+export MUTEX_TEST_CURL="completed"
+export MUTEX_POLL_SECONDS=1
+export ARG_MAX_WAIT_SECONDS=5
+run_in_case 'enqueue "$ARG_BRANCH" "$QF" "$TICKET"; wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 0 "$RC" "37: acquired well inside 5s"
+assert_eq "$TICKET" "$(first_line | cut -d, -f1)" "37: junk holder evicted, we hold the lock"
+teardown_case
+
+# ---------------------------------------------------------------------------
 echo
 echo "== results: $PASS passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
