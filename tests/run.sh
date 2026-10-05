@@ -51,6 +51,7 @@ setup_case() {
 	export MUTEX_POLL_SECONDS=0
 	export MUTEX_RETRY_SLEEP=0
 	export MUTEX_FETCH_RETRY_SLEEP=0
+	export MUTEX_DEADLINE_GRACE=0
 	export MUTEX_TEST_CURL="fail"
 	unset MUTEX_TEST_URL_LOG
 	RUN_URL="https://github.com/org/repo/actions/runs/12345/attempts/1"
@@ -594,6 +595,30 @@ run_in_case 'wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
 assert_rc 0 "$RC" "33: acquired past the \\r line"
 assert_eq "$TICKET" "$(first_line | cut -d, -f1)" "33: we are the holder"
 assert_eq 0 "$(origin_queue | grep -c "$(printf '\r')")" "33: \\r line garbage-collected"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "34: persistently rejected pushes give up at max-wait instead of spinning"
+setup_case
+seed_origin </dev/null
+reject_pushes 200
+export ARG_MAX_WAIT_SECONDS=1
+run_in_case 'wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 1 "$RC" "34a: re-enqueue under rejection fails at the deadline"
+assert_log "Enqueue push still rejected" "34a: ::error names the cause"
+if [ "$(cat "$WORK/pushes")" -lt 200 ]; then ok "34a: stopped before the hook relented"; else bad "34a: stopped before the hook relented" "$(cat "$WORK/pushes") pushes"; fi
+teardown_case
+setup_case
+printf '%s\n%s\n' "liveholder,https://github.com/org/repo/actions/runs/777/attempts/1,10" "$TICKET,$RUN_URL,20" | seed_origin
+reject_pushes 200
+export MUTEX_TEST_CURL="in_progress"
+export MUTEX_POLL_SECONDS=1
+export ARG_MAX_WAIT_SECONDS=1
+run_in_case 'wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 1 "$RC" "34b: timeout still fails the step"
+assert_log "Could not self-dequeue" "34b: self-dequeue gave up at the deadline"
+assert_log "Mutex wait timeout" "34b: timeout ::error still emitted"
+if [ "$(cat "$WORK/pushes")" -lt 200 ]; then ok "34b: stopped before the hook relented"; else bad "34b: stopped before the hook relented" "$(cat "$WORK/pushes") pushes"; fi
 teardown_case
 
 # ---------------------------------------------------------------------------

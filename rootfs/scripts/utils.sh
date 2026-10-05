@@ -124,6 +124,17 @@ remove_exact() {
 	L="$1" awk '/[^[:space:]]/ && $0 != ENVIRON["L"]' "$2" > "$2.tmp" && mv "$2.tmp" "$2"
 }
 
+# With max-wait set, push retries stop at max-wait + grace instead of spinning until the job timeout.
+arm_deadline() {
+	if [ -z "${__MUTEX_DEADLINE:-}" ] && [ -n "${ARG_MAX_WAIT_SECONDS:-}" ]; then
+		__MUTEX_DEADLINE=$(( $(date +%s) + ARG_MAX_WAIT_SECONDS + ${MUTEX_DEADLINE_GRACE:-30} ))
+	fi
+}
+
+past_deadline() {
+	[ -n "${__MUTEX_DEADLINE:-}" ] && [ "$(date +%s)" -gt "$__MUTEX_DEADLINE" ]
+}
+
 # Add to the queue (iterative; FF-push retry on rejection). No-op if already queued.
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
@@ -143,6 +154,7 @@ enqueue() {
 	__ticket_id=$3
 
 	echo "[$__ticket_id] Enqueuing to branch $__branch, file $__queue_file"
+	arm_deadline
 
 	while : ; do
 		update_branch "$__branch"
@@ -167,6 +179,10 @@ enqueue() {
 
 		if git_push "$__branch"; then
 			return 0
+		fi
+		if past_deadline; then
+			echo "::error title=Mutex push failing::[$__ticket_id] Enqueue push still rejected after max-wait-seconds; giving up"
+			return 1
 		fi
 		sleep "${MUTEX_RETRY_SLEEP:-1}"
 	done
@@ -351,6 +367,7 @@ wait_for_lock() {
 	__ticket_id=$3
 
 	__start=$(date +%s)
+	arm_deadline
 	__last_holder=""
 	__last_check=0
 	__first_iter=1
@@ -380,7 +397,8 @@ wait_for_lock() {
 				__holder_line=$__first
 				__queue_dump=$(awk '/[^[:space:]]/ {printf "%s%%0A", $0}' "$__queue_file")
 				echo "[$__ticket_id] Max wait exceeded (${__waited}s > ${ARG_MAX_WAIT_SECONDS}s); self-dequeuing"
-				dequeue "$__branch" "$__queue_file" "$__ticket_id"
+				dequeue "$__branch" "$__queue_file" "$__ticket_id" ||
+					echo "[$__ticket_id] Could not self-dequeue before the deadline; our run's completion will make the ticket evictable"
 				echo "::error title=Mutex wait timeout::Waited ${__waited}s (limit ${ARG_MAX_WAIT_SECONDS}s) for the mutex.%0ACurrent holder: ${__holder_line}%0AQueue:%0A${__queue_dump}Check whether the holder run is still running."
 				exit 1
 			fi
@@ -476,6 +494,10 @@ dequeue() {
 
 		if git_push "$__branch"; then
 			return 0
+		fi
+		if past_deadline; then
+			echo "::error title=Mutex push failing::[$__ticket_id] Dequeue push still rejected after max-wait-seconds; giving up"
+			return 1
 		fi
 		sleep "${MUTEX_RETRY_SLEEP:-1}"
 	done
