@@ -1,7 +1,6 @@
 #!/bin/bash
-# Network-free curl stub for `curl -s -w '\n%{http_code}' URL`: prints body, newline, status.
-# Mode via MUTEX_TEST_CURL (`byrun`: completed iff run id in MUTEX_TEST_CURL_COMPLETED_RUNS); /jobs serves MUTEX_TEST_CURL_JOBS.
-# If MUTEX_TEST_URL_LOG is set, append the requested URL (the last argument) to it.
+# curl stub for `curl -s -w '\n%{http_code}' URL`: body, newline, status per MUTEX_TEST_CURL (/jobs: MUTEX_TEST_CURL_JOBS).
+# `byrun` = completed iff the URL's run id is in MUTEX_TEST_CURL_COMPLETED_RUNS; URLs logged to MUTEX_TEST_URL_LOG.
 for __a in "$@"; do :; done
 if [ -n "${MUTEX_TEST_URL_LOG:-}" ]; then
 	printf '%s\n' "$__a" >> "$MUTEX_TEST_URL_LOG"

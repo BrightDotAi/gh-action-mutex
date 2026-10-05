@@ -51,10 +51,11 @@ It might be necessary to adjust the GitHub Server URL in case you are using a Gi
 
 This fork (`BrightDotAi/gh-action-mutex`) hardens the queue against stale/orphaned holders (CORE-1385):
 
-- **Self-describing queue lines.** Each line is `TICKET,RUN_URL,ENQ_EPOCH` (an advisory `,ACQ_EPOCH` is appended on acquisition). All matching keys on the first comma-field, so old plain-ticket lines from earlier versions stay compatible.
+- **Self-describing queue lines.** Each line is `TICKET,RUN_URL,ENQ_EPOCH` (an advisory `,ACQ_EPOCH` is appended on acquisition); `RUN_URL` is `.../actions/runs/ID/attempts/N#runner=NAME`. All matching keys on the first comma-field, so old plain-ticket lines from earlier versions stay compatible.
 - **Blank-line immunity.** Blank lines (including the empty file a GitHub-UI delete leaves behind) are skipped when reading the holder and garbage-collected on every write, so they can no longer wedge the queue.
-- **Stale-holder eviction.** A waiter evicts the line-1 holder only on positive evidence it is dead — the holder's run *attempt* (`.../attempts/N`) reports `completed` via the GitHub API. Anything else (in-progress, API error, old-format line) is never evicted. Eviction is compare-and-swap: the same holder line must still be first when the removal is pushed.
-- **`max-wait-seconds` input** (optional, default empty = wait forever). When exceeded, the job self-dequeues, emits a `::error::` annotation with the current holder and full queue, and exits 1.
+- **Stale-holder eviction.** A waiter evicts the line-1 holder only on positive evidence it is dead: the holder's run *attempt* (`.../attempts/N`) reports `completed`, or, while the attempt is still running, exactly one of its jobs ran on the holder's runner, was alive at enqueue, and has completed. Anything else (in-progress, ambiguous, API error, old-format line) is never evicted. The API is only ever queried on the configured `github_server`, never a host named in the queue. Eviction is compare-and-swap: the same holder line must still be first when the removal is pushed.
+- **Token.** `repo-token` needs `contents: write` on the lock repo and `actions: read` on every repo whose runs take the lock (the default `github.token` cannot see other repos). A 401/403/404 emits one `::warning` per job, since it means eviction is inert (a 404 can also mean the holder's run was deleted).
+- **`max-wait-seconds` input** (optional; empty = wait forever, else 1–999999999). When exceeded, the job self-dequeues, emits a `::error::` annotation with the current holder and full queue, and exits 1. Push retries also stop 30s past the limit instead of spinning until the job timeout.
 - **Self-healing unlock.** If the ticket is already gone (evicted or cleaned), unlock exits 0 instead of failing.
 
 ## Motivation

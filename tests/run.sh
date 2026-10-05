@@ -1,7 +1,6 @@
 #!/bin/bash
-# Self-contained, network-free, Docker-free test harness for the mutex scripts.
-# Uses a bare git repo as origin (file://), a PATH curl stub for run-status, and
-# MUTEX_POLL_SECONDS/MUTEX_RETRY_SLEEP/MUTEX_FETCH_RETRY_SLEEP overrides to keep the suite fast.
+# Network-free harness: a bare file:// git origin, a PATH curl stub for run status,
+# and zeroed MUTEX_*_SLEEP/POLL knobs to keep it fast.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UTILS="$REPO_ROOT/rootfs/scripts/utils.sh"

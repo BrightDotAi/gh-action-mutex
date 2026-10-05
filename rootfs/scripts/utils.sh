@@ -1,6 +1,5 @@
-# Queue line format: TICKET,RUN_URL,ENQ_EPOCH[,ACQ_EPOCH]. Everything keys on
-# field 1 (the ticket); an old-format line with no commas has field 1 == whole
-# line, so old and new versions coexist safely on the same lock branch.
+# Queue line: TICKET,RUN_URL,ENQ_EPOCH[,ACQ_EPOCH]. Everything keys on field 1, so an old
+# comma-less line (field 1 == whole line) coexists with new ones on the same lock branch.
 
 # Set up the mutex repo
 # args:
@@ -106,9 +105,8 @@ gc_blanks() {
 	awk '/[^[:space:]]/' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
-# 1-based position of our ticket among non-blank lines (field-1 match); empty if absent.
-# ENVIRON (not -v): awk -v escape-processes backslashes, so a ticket with a literal
-# backslash would never match the on-disk line. ENVIRON passes the value verbatim.
+# 1-based position of our ticket among non-blank lines; empty if absent.
+# ENVIRON, not awk -v: -v escape-processes backslashes in the value.
 queue_position() {
 	T="$1" awk -F, '/[^[:space:]]/ { i++; if ($1 == ENVIRON["T"]) { print i; exit } }' "$2"
 }
@@ -135,9 +133,6 @@ past_deadline() {
 	[ -n "${__MUTEX_DEADLINE:-}" ] && [ "$(date +%s)" -gt "$__MUTEX_DEADLINE" ]
 }
 
-# Add to the queue (iterative; FF-push retry on rejection). No-op if already queued.
-# args:
-#   $1: branch  $2: queue_file  $3: ticket_id
 # No /attempts/N unless the attempt is known: guessing 1 can name a completed attempt and evict a live re-run.
 build_run_url() {
 	__base="${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -152,6 +147,9 @@ build_run_url() {
 	esac
 }
 
+# Add to the queue (iterative; FF-push retry on rejection). No-op if already queued.
+# args:
+#   $1: branch  $2: queue_file  $3: ticket_id
 # uses global RUN_URL
 enqueue() {
 	__branch=$1
@@ -264,8 +262,7 @@ holder_job_completed() {
 	[ "$__verdict" = "completed" ]
 }
 
-# Attempt to evict the current (line-1) holder, but only on positive evidence
-# (the holder's run attempt is completed). Never evicts on doubt.
+# Evict the line-1 holder only on positive evidence it is dead (its run attempt or its own job completed).
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id  $4: observed holder line
 try_evict() {
@@ -421,9 +418,7 @@ wait_for_lock() {
 
 		__now=$(date +%s)
 
-		# max-wait-seconds: self-dequeue, emit an error annotation, and fail.
-		# Evaluated BEFORE the re-enqueue path so a timeout still fires even while
-		# we are repeatedly re-enqueuing a lost/evicted ticket.
+		# Before the re-enqueue path, so a timeout still fires while a lost ticket keeps being re-enqueued.
 		if [ -n "${ARG_MAX_WAIT_SECONDS:-}" ] && [ "${ARG_MAX_WAIT_SECONDS}" -gt 0 ]; then
 			__waited=$((__now - __start))
 			if [ "$__waited" -gt "$ARG_MAX_WAIT_SECONDS" ]; then

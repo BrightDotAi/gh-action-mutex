@@ -18,9 +18,7 @@ __repo_url="https://x-access-token:$ARG_REPO_TOKEN@$ARG_GITHUB_SERVER/$ARG_REPOS
 
 validate_max_wait "$ARG_MAX_WAIT_SECONDS" || exit 1
 
-# Strip commas/whitespace AND backslashes: a literal backslash in the ticket would
-# survive to awk and break field matching (awk sees it as an escape). The trailing
-# '\\' in the single-quoted set is one backslash char handed to tr.
+# The trailing '\\' in the single-quoted set is one backslash char handed to tr.
 __suffix=$(printf '%s' "$ARG_TICKET_ID_SUFFIX" | tr -d ', \t\r\n\\')
 __ticket_id="$GITHUB_RUN_ID-$(date +%s)-$(( RANDOM % 1000 ))-$__suffix"
 echo "ticket_id=$__ticket_id" >> "$GITHUB_STATE"
