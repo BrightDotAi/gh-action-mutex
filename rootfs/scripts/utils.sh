@@ -81,9 +81,9 @@ git_push() {
 	return $__rc
 }
 
-# First non-blank line (blank = empty or whitespace-only) of a file.
+# First non-blank line of a file. [[:space:]], not NF: NF counts a lone \r as content.
 first_nonblank_line() {
-	awk 'NF {print; exit}' "$1"
+	awk '/[^[:space:]]/ {print; exit}' "$1"
 }
 
 # Field 1 (ticket) of a line, up to the first comma.

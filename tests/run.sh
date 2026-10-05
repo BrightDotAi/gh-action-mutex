@@ -75,8 +75,8 @@ seed_origin() {
 }
 
 origin_queue()   { git --git-dir="$ORIGIN" show "$BRANCH:$QF" 2>/dev/null; }
-nonblank_count() { origin_queue | awk 'NF' | wc -l | tr -d ' '; }
-first_line()     { origin_queue | awk 'NF{print;exit}'; }
+nonblank_count() { origin_queue | awk '/[^[:space:]]/' | wc -l | tr -d ' '; }
+first_line()     { origin_queue | awk '/[^[:space:]]/{print;exit}'; }
 field_count()    { awk -F, '{print NF}' <<<"$1"; }
 has_field1()     { origin_queue | awk -F, -v t="$1" 'NF && $1==t {found=1} END{exit !found}'; }
 commit_subjects(){ git --git-dir="$ORIGIN" log --format=%s "$BRANCH"; }
@@ -573,6 +573,18 @@ run_in_case 'wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
 assert_rc 0 "$RC" "32: lock acquired despite the rejected amend"
 assert_eq 5 "$(cat "$WORK/pushes")" "32: exactly 5 amend push attempts (bounded)"
 assert_log "Could not persist acquire timestamp" "32: logged the give-up"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "33: a lone \\r line on top is blank, not a phantom holder"
+setup_case
+printf '\r\n%s\n' "$TICKET,$RUN_URL,100" | seed_origin
+export MUTEX_POLL_SECONDS=1
+export ARG_MAX_WAIT_SECONDS=1
+run_in_case 'wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 0 "$RC" "33: acquired past the \\r line"
+assert_eq "$TICKET" "$(first_line | cut -d, -f1)" "33: we are the holder"
+assert_eq 0 "$(origin_queue | grep -c "$(printf '\r')")" "33: \\r line garbage-collected"
 teardown_case
 
 # ---------------------------------------------------------------------------
