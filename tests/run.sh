@@ -87,6 +87,18 @@ run_in_case() {
 	RC=$?
 }
 
+# origin rejects the first $1 pushes then accepts (so a regression can't hang the suite); attempts in $WORK/pushes
+reject_pushes() {
+	echo 0 > "$WORK/pushes"
+	cat > "$ORIGIN/hooks/pre-receive" <<HOOK
+#!/bin/sh
+n=\$(cat "$WORK/pushes"); n=\$((n + 1)); echo "\$n" > "$WORK/pushes"
+[ "\$n" -gt $1 ] && exit 0
+echo "rejected by test hook" >&2; exit 1
+HOOK
+	chmod +x "$ORIGIN/hooks/pre-receive"
+}
+
 echo "== gh-action-mutex robustness suite =="
 
 # ---------------------------------------------------------------------------
@@ -550,6 +562,17 @@ for i in 1 2 3 4 5 6; do stress_worker "$i" new "$((3000 + i))" & done
 if stress_wait 150; then ok "31: finished before the deadline"; else bad "31: finished before the deadline" "workers killed at 150s"; fi
 stress_assert 31 6
 assert_eq 1 "$(commit_subjects | grep -cF 'Evict stale holder [deadholder]')" "31: exactly one eviction commit"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "32: acquire-amend push always rejected -> gives up after 5 tries, still acquires"
+setup_case
+printf '%s\n' "$TICKET,$RUN_URL,100" | seed_origin
+reject_pushes 50
+run_in_case 'wait_for_lock "$ARG_BRANCH" "$QF" "$TICKET"'
+assert_rc 0 "$RC" "32: lock acquired despite the rejected amend"
+assert_eq 5 "$(cat "$WORK/pushes")" "32: exactly 5 amend push attempts (bounded)"
+assert_log "Could not persist acquire timestamp" "32: logged the give-up"
 teardown_case
 
 # ---------------------------------------------------------------------------

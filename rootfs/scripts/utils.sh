@@ -172,9 +172,8 @@ enqueue() {
 	done
 }
 
-# Append the advisory ACQ_EPOCH to our own line once we hold the lock.
-# Advisory metadata only: acquisition never depends on it and a failed amend
-# must not block or fail the lock step (best-effort, bounded retries).
+# Append the advisory ACQ_EPOCH to our own line once we hold the lock (best-effort,
+# bounded): acquisition never depends on it, and a failed amend must not block the lock step.
 # args:
 #   $1: branch  $2: queue_file  $3: ticket_id
 acquire_amend() {
@@ -182,13 +181,11 @@ acquire_amend() {
 	__queue_file=$2
 	__ticket_id=$3
 
-	# Advisory only: isolate the entire body in a subshell and swallow ANY failure
-	# (awk/mv/commit under set -e included) so a bad amend can never fail the lock step.
 	if ! (
-		set -e
-		__attempt=0
-		while [ "$__attempt" -lt 5 ]; do
-			__attempt=$((__attempt + 1))
+		# Own counter: update_branch resets the shared global __attempt on every call.
+		__amend_try=0
+		while [ "$__amend_try" -lt 5 ]; do
+			__amend_try=$((__amend_try + 1))
 
 			__line=$(first_nonblank_line "$__queue_file")
 			if [ "$(field1 "$__line")" != "$__ticket_id" ]; then
