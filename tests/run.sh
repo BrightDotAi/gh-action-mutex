@@ -53,7 +53,7 @@ setup_case() {
 	export MUTEX_FETCH_RETRY_SLEEP=0
 	export MUTEX_DEADLINE_GRACE=0
 	export MUTEX_TEST_CURL="fail"
-	unset MUTEX_TEST_URL_LOG
+	unset MUTEX_TEST_URL_LOG MUTEX_TEST_CURL_JOBS MUTEX_TEST_CURL_JOBS_CODE RUNNER_NAME
 	RUN_URL="https://github.com/org/repo/actions/runs/12345/attempts/1"
 	TICKET="12345-100-1-default"
 }
@@ -620,6 +620,56 @@ assert_log "Could not self-dequeue" "34b: self-dequeue gave up at the deadline"
 assert_log "Mutex wait timeout" "34b: timeout ::error still emitted"
 if [ "$(cat "$WORK/pushes")" -lt 200 ]; then ok "34b: stopped before the hook relented"; else bad "34b: stopped before the hook relented" "$(cat "$WORK/pushes") pushes"; fi
 teardown_case
+
+# ---------------------------------------------------------------------------
+start "35: run URL records the runner name for same-run eviction"
+setup_case
+B="https://github.com/org/repo/actions/runs/12345/attempts/1"
+export RUNNER_NAME="bai-mgmt-uw2-automation-dind-small-l6cr4-runner-tf4q9"
+assert_eq "$B#runner=$RUNNER_NAME" "$(build_run_url)" "35: ARC runner name recorded"
+export RUNNER_NAME="GitHub Actions 1000012345"
+assert_eq "$B#runner=GitHub%20Actions%201000012345" "$(build_run_url)" "35: spaces percent-encoded"
+export RUNNER_NAME="bad,name#x"
+assert_eq "$B" "$(build_run_url)" "35: unsafe runner name omitted, not mangled"
+unset GITHUB_RUN_ATTEMPT
+export RUNNER_NAME="r-1"
+assert_eq "https://github.com/org/repo/actions/runs/12345" "$(build_run_url)" "35: no runner without a known attempt"
+teardown_case
+
+# ---------------------------------------------------------------------------
+start "36: run still in progress -> evict only an unambiguous dead holder job"
+# enq epoch 1000 = 1970-01-01T00:16:40Z; t0/t1 bracket it, t_early ends before it
+J_DEAD='{"runner_name":"r-1","status":"completed","started_at":"1970-01-01T00:00:00Z","completed_at":"1970-01-01T01:00:00Z"}'
+J_LIVE='{"runner_name":"r-1","status":"in_progress","started_at":"1970-01-01T00:00:00Z","completed_at":null}'
+J_SIB='{"runner_name":"r-2","status":"in_progress","started_at":"1970-01-01T00:00:00Z","completed_at":null}'
+J_EARLY='{"runner_name":"r-1","status":"completed","started_at":"1970-01-01T00:00:00Z","completed_at":"1970-01-01T00:10:00Z"}'
+for C in dead live twice reused nofrag jobs500 over100; do
+	setup_case
+	H="deadjob,https://github.com/org/repo/actions/runs/555/attempts/1#runner=r-1,1000"
+	JOBS="{\"total_count\":2,\"jobs\":[$J_DEAD,$J_SIB]}"; WANT=evict
+	case "$C" in
+		live)    JOBS="{\"total_count\":2,\"jobs\":[$J_LIVE,$J_SIB]}"; WANT=keep ;;
+		twice)   JOBS="{\"total_count\":3,\"jobs\":[$J_DEAD,$J_LIVE,$J_SIB]}"; WANT=keep ;;
+		reused)  JOBS="{\"total_count\":2,\"jobs\":[$J_EARLY,$J_SIB]}"; WANT=keep ;;
+		nofrag)  H="deadjob,https://github.com/org/repo/actions/runs/555/attempts/1,1000"; WANT=keep ;;
+		jobs500) export MUTEX_TEST_CURL_JOBS_CODE=500; WANT=keep ;;
+		over100) JOBS="{\"total_count\":150,\"jobs\":[$J_DEAD,$J_SIB]}"; WANT=keep ;;
+	esac
+	export MUTEX_TEST_CURL_JOBS="$JOBS" MUTEX_TEST_CURL="in_progress"
+	export MUTEX_TEST_URL_LOG="$WORK/urls.log"; : > "$MUTEX_TEST_URL_LOG"
+	printf '%s\n' "$H" | seed_origin
+	run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$H"'"'
+	if [ "$WANT" = evict ]; then
+		if has_field1 "deadjob"; then bad "36[$C]: dead holder job evicted"; else ok "36[$C]: dead holder job evicted"; fi
+		if commit_subjects | grep -qF "Evict stale holder [deadjob] (holder job completed)"; then ok "36[$C]: commit names the job-level reason"; else bad "36[$C]: commit names the job-level reason"; fi
+	else
+		if has_field1 "deadjob"; then ok "36[$C]: not evicted"; else bad "36[$C]: not evicted"; fi
+	fi
+	if [ "$C" = nofrag ]; then
+		assert_eq 0 "$(grep -c '/jobs' "$MUTEX_TEST_URL_LOG")" "36[$C]: no jobs request without a recorded runner"
+	fi
+	teardown_case
+done
 
 # ---------------------------------------------------------------------------
 echo

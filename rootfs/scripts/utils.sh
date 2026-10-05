@@ -142,8 +142,13 @@ past_deadline() {
 build_run_url() {
 	__base="${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 	case "${GITHUB_RUN_ATTEMPT:-}" in
-		''|*[!0-9]*) printf '%s\n' "$__base" ;;
-		*)           printf '%s/attempts/%s\n' "$__base" "$GITHUB_RUN_ATTEMPT" ;;
+		''|*[!0-9]*) printf '%s\n' "$__base"; return ;;
+	esac
+	__base="$__base/attempts/$GITHUB_RUN_ATTEMPT"
+	# #runner= lets a waiter in the same run tell the holder's job from live siblings.
+	case "${RUNNER_NAME:-}" in
+		''|*[!A-Za-z0-9._\ -]*) printf '%s\n' "$__base" ;;
+		*) printf '%s#runner=%s\n' "$__base" "${RUNNER_NAME// /%20}" ;;
 	esac
 }
 
@@ -236,6 +241,29 @@ acquire_amend() {
 	return 0
 }
 
+# Exactly one job of the attempt ran on the holder's runner, was alive at its enqueue, and completed.
+# uses globals __api __runner __enq ARG_REPO_TOKEN; sets __verdict
+holder_job_completed() {
+	__verdict="no enqueue time"
+	case "$__enq" in ''|*[!0-9]*) return 1 ;; esac
+	__jout=$(curl -s --max-time 10 -w '\n%{http_code}' \
+		-H "Authorization: Bearer $ARG_REPO_TOKEN" \
+		-H "Accept: application/vnd.github+json" \
+		"$__api/jobs?per_page=100" 2>/dev/null) || __jout=$'\n000'
+	__verdict="jobs HTTP ${__jout##*$'\n'}"
+	[ "${__jout##*$'\n'}" = "200" ] || return 1
+	__verdict=$(printf '%s' "${__jout%$'\n'*}" | R="$__runner" E="$__enq" jq -r '
+		if (.total_count // 0) > 100 then "ambiguous (over 100 jobs)" else
+		[.jobs[] | select(.runner_name == env.R)] as $m
+		| if ($m | length) != 1 then "ambiguous (\($m | length) jobs on runner)"
+		  else $m[0] | if .status == "completed"
+		      and (.started_at // "") != "" and (.started_at | fromdateiso8601) <= (env.E | tonumber)
+		      and (.completed_at // "") != "" and (.completed_at | fromdateiso8601) >= (env.E | tonumber)
+		    then "completed" else "not completed" end
+		  end end' 2>/dev/null || true)
+	[ "$__verdict" = "completed" ]
+}
+
 # Attempt to evict the current (line-1) holder, but only on positive evidence
 # (the holder's run attempt is completed). Never evicts on doubt.
 # args:
@@ -256,11 +284,13 @@ try_evict() {
 
 	# Attempt-specific endpoint: a re-run makes the plain runs endpoint report the
 	# latest attempt, masking an orphaned earlier attempt as still alive.
-	if [[ "$__url" =~ ^(https?)://([^/]+)/(.+)/actions/runs/([0-9]+)/attempts/([0-9]+)$ ]]; then
+	if [[ "$__url" =~ ^(https?)://([^/]+)/(.+)/actions/runs/([0-9]+)/attempts/([0-9]+)(#runner=([A-Za-z0-9._%-]+))?$ ]]; then
 		__server=${BASH_REMATCH[2]}
 		__orgrepo=${BASH_REMATCH[3]}
 		__runid=${BASH_REMATCH[4]}
 		__att=${BASH_REMATCH[5]}
+		__runner=${BASH_REMATCH[7]//%20/ }
+		__enq=$(printf '%s' "$__holder_line" | awk -F, '{print $3}')
 	else
 		echo "[$__ticket_id] Holder [$__holder] URL not a recognized run-attempt URL; not evicting"
 		return 0
@@ -318,9 +348,13 @@ try_evict() {
 		echo "[$__ticket_id] Holder [$__holder] status unparseable; not evicting"
 		return 0
 	fi
+	__reason="run attempt completed"
 	if [ "$__status" != "completed" ]; then
-		echo "[$__ticket_id] Holder [$__holder] run status=$__status; not evicting"
-		return 0
+		if [ -z "$__runner" ] || ! holder_job_completed; then
+			echo "[$__ticket_id] Holder [$__holder] run status=$__status${__runner:+, job on [$__runner]: $__verdict}; not evicting"
+			return 0
+		fi
+		__reason="holder job completed"
 	fi
 
 	# CAS: re-fetch and confirm the same line is still the holder before removing it.
@@ -330,7 +364,7 @@ try_evict() {
 		return 0
 	fi
 
-	echo "[$__ticket_id] Evicting stale holder [$__holder] (run attempt completed)"
+	echo "[$__ticket_id] Evicting stale holder [$__holder] ($__reason)"
 	remove_exact "$__holder_line" "$__queue_file"
 	git add "$__queue_file"
 	# Empty-commit guard: a no-op removal must not abort the script under set -e.
@@ -338,7 +372,7 @@ try_evict() {
 		echo "[$__ticket_id] Eviction produced no change; nothing to commit"
 		return 0
 	fi
-	git commit -m "[$__ticket_id] Evict stale holder [$__holder] (run attempt completed)" --quiet
+	git commit -m "[$__ticket_id] Evict stale holder [$__holder] ($__reason)" --quiet
 	if ! git_push "$__branch"; then
 		# Do not blind-retry: let the wait loop re-fetch and re-evaluate from scratch.
 		echo "[$__ticket_id] Eviction push rejected; will re-evaluate"
