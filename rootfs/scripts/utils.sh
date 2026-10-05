@@ -276,7 +276,12 @@ try_evict() {
 		401|403|404)
 			# Silent here = the original wedge: holders stay stuck and nothing says why.
 			if [ -z "${__MUTEX_INERT_WARNED:-}" ]; then
-				echo "::warning title=Mutex stale-lock eviction inert::HTTP $__code reading holder run status; repo-token needs actions:read on $__orgrepo. Stale holders will not be auto-evicted."
+				if [ "$__code" = "404" ]; then
+					__why="the run was deleted, or repo-token cannot see $__orgrepo (needs actions:read)"
+				else
+					__why="repo-token needs actions:read on $__orgrepo"
+				fi
+				echo "::warning title=Mutex stale-lock eviction inert::HTTP $__code reading holder run status: $__why. Stale holders will not be auto-evicted."
 				__MUTEX_INERT_WARNED=1
 			fi
 			echo "[$__ticket_id] Could not query holder [$__holder] run status (HTTP $__code); not evicting"

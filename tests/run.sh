@@ -431,7 +431,10 @@ for M in http401 http404 http429 http500; do
 	run_in_case 'try_evict "$ARG_BRANCH" "$QF" "$TICKET" "'"$H"'"'
 	if has_field1 "holder"; then ok "26[$M]: not evicted"; else bad "26[$M]: not evicted"; fi
 	case "$M" in
-		http401|http404) assert_log "eviction inert" "26[$M]: inert warning" ;;
+		http401) assert_log "eviction inert" "26[$M]: inert warning"
+			if grep -qF "deleted" "$WORK/out.log"; then bad "26[$M]: permission wording, no deleted-run hint"; else ok "26[$M]: permission wording, no deleted-run hint"; fi ;;
+		http404) assert_log "eviction inert" "26[$M]: inert warning"
+			assert_log "the run was deleted" "26[$M]: 404 names the deleted-run possibility" ;;
 		*) if grep -qF "eviction inert" "$WORK/out.log"; then bad "26[$M]: transient, no inert warning"; else ok "26[$M]: transient, no inert warning"; fi ;;
 	esac
 	teardown_case
